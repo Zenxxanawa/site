@@ -1,27 +1,19 @@
 const express = require('express');
 const crypto = require('crypto');
 const sqlite3 = require('sqlite3').verbose();
-const rateLimit = require('express-rate-limit');
 const cors = require('cors');
-const path = require('path');
 const app = express();
 
 const PORT = process.env.PORT || 3000;
 
-
+// Middleware
 app.use(cors());
 app.use(express.json());
 
+// Database setup
+const db = new sqlite3.Database(':memory:');
 
-const limiter = rateLimit({
-    windowMs: 15 * 60 * 1000,
-    max: 100
-});
-app.use(limiter);
-
-
-const db = new sqlite3.Database(':memory:'); // Use memory for demo (change to file for production)
-
+// Initialize database
 db.serialize(() => {
     db.run(`CREATE TABLE IF NOT EXISTS keys (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -29,28 +21,24 @@ db.serialize(() => {
         hwid TEXT,
         user_id TEXT,
         generated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-        activated_at DATETIME,
         expires_at DATETIME,
-        is_used BOOLEAN DEFAULT 0,
-        is_banned BOOLEAN DEFAULT 0,
-        key_type TEXT DEFAULT 'STANDARD',
-        uses INTEGER DEFAULT 0,
-        max_uses INTEGER DEFAULT 1
+        is_used BOOLEAN DEFAULT 0
     )`);
     
-    db.run(`INSERT OR IGNORE INTO keys (key_value, key_type, expires_at, max_uses) VALUES 
-        ('TEST1-2345-6789-ABCD', 'STANDARD', datetime('now', '+30 days'), 5),
-        ('DEMO-KEY-1234-5678', 'PREMIUM', datetime('now', '+90 days'), 1)
+    // Insert demo keys
+    db.run(`INSERT OR IGNORE INTO keys (key_value, expires_at) VALUES 
+        ('TEST1-2345-6789-ABCD', datetime('now', '+30 days')),
+        ('DEMO-KEY-1234-5678', datetime('now', '+90 days'))
     `);
 });
 
-
+// Generate HWID
 function generateHWID(clientInfo) {
     const data = `${clientInfo.userId}-${clientInfo.executor}-${clientInfo.placeId}`;
     return crypto.createHash('sha256').update(data).digest('hex').substring(0, 16);
 }
 
-
+// API Routes
 app.get('/', (req, res) => {
     res.json({ 
         message: 'Key System API - Running on Render',
@@ -66,10 +54,14 @@ app.post('/api/validate', (req, res) => {
         return res.json({ success: false, error: 'Missing key or userId' });
     }
     
-    const hwid = generateHWID({ userId, executor: executor || 'unknown', placeId: placeId || 'unknown' });
+    const hwid = generateHWID({ 
+        userId, 
+        executor: executor || 'unknown', 
+        placeId: placeId || 'unknown' 
+    });
     
     db.get(
-        `SELECT * FROM keys WHERE key_value = ? AND is_banned = 0`,
+        `SELECT * FROM keys WHERE key_value = ?`,
         [key.toUpperCase().trim()],
         (err, row) => {
             if (err || !row) {
@@ -84,58 +76,24 @@ app.post('/api/validate', (req, res) => {
                 return res.json({ success: false, error: 'Key expired' });
             }
             
-            if (row.uses >= row.max_uses) {
-                return res.json({ success: false, error: 'Key usage limit reached' });
-            }
-            
-            db.run(`UPDATE keys SET uses = uses + 1 WHERE key_value = ?`, [key]);
-            
-            res.json({
-                success: true,
-                message: 'Key valid',
-                key_type: row.key_type,
-                expires: row.expires_at,
-                uses: row.uses + 1,
-                max_uses: row.max_uses
-            });
-        }
-    );
-});
-
-app.post('/api/activate', (req, res) => {
-    const { key, userId, executor, placeId } = req.body;
-    
-    const hwid = generateHWID({ userId, executor: executor || 'unknown', placeId: placeId || 'unknown' });
-    
-    db.get(
-        `SELECT * FROM keys WHERE key_value = ? AND is_banned = 0`,
-        [key.toUpperCase().trim()],
-        (err, row) => {
-            if (err || !row) {
-                return res.json({ success: false, error: 'Invalid key' });
-            }
-            
-            if (row.is_used && row.hwid !== hwid) {
-                return res.json({ success: false, error: 'Key already activated on different device' });
-            }
-            
+            // First time use
             if (!row.is_used) {
                 db.run(
-                    `UPDATE keys SET hwid = ?, is_used = 1, activated_at = CURRENT_TIMESTAMP, user_id = ? WHERE key_value = ?`,
+                    `UPDATE keys SET hwid = ?, is_used = 1, user_id = ? WHERE key_value = ?`,
                     [hwid, userId, key]
                 );
             }
             
             res.json({
                 success: true,
-                message: 'Key activated successfully',
+                message: 'Key valid',
                 hwid: hwid,
-                key_type: row.key_type
+                expires: row.expires_at
             });
         }
     );
 });
 
 app.listen(PORT, () => {
-    console.log(`Key system running on port ${PORT}`);
+    console.log(`✅ Key system running on port ${PORT}`);
 });
